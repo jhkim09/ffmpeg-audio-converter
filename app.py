@@ -8,18 +8,21 @@ app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Celery 설정
-app.config["CELERY_BROKER_URL"] = "redis://localhost:6379/0"
-app.config["CELERY_RESULT_BACKEND"] = "redis://localhost:6379/0"
+# Render에서 제공하는 REDIS_URL 사용 (없으면 기본값 localhost:6379)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+app.config["CELERY_BROKER_URL"] = REDIS_URL
+app.config["CELERY_RESULT_BACKEND"] = REDIS_URL
 
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
 celery.conf.update(app.config)
 
-# 파일 변환 작업 (Celery)
+# Celery 작업: 오디오 변환
 @celery.task(bind=True)
 def convert_audio_task(self, input_file):
     output_file = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}.mp3")
 
+    # FFmpeg을 사용하여 M4A → MP3 변환
     command = f'ffmpeg -i "{input_file}" -c:a libmp3lame -b:a 128k "{output_file}"'
     os.system(command)
 
@@ -35,6 +38,7 @@ def convert_audio():
     input_path = os.path.join(UPLOAD_FOLDER, file.filename)
     file.save(input_path)
 
+    # 비동기 변환 작업 실행
     task = convert_audio_task.apply_async(args=[input_path])
     return jsonify({"status": "accepted", "task_id": task.id}), 202
 
