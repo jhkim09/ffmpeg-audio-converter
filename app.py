@@ -1,12 +1,15 @@
 import os
 import uuid
+import math
 from flask import Flask, request, jsonify, send_from_directory
 from celery import Celery
+import subprocess
 
-# Flask 앱 설정
 app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
+OUTPUT_FOLDER = "outputs"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # Render에서 제공하는 REDIS_URL 사용 (없으면 기본값 localhost:6379)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -19,16 +22,48 @@ celery.conf.update(app.config)
 
 print(f"🔹 현재 사용 중인 REDIS_URL: {REDIS_URL}")
 
-# Celery 작업: 오디오 변환
+# 20MB 단위로 오디오를 분할하는 함수
+def split_audio(input_file, output_prefix, segment_time=600):
+    """FFmpeg을 사용하여 지정된 시간(초) 간격으로 오디오 파일을 분할"""
+    output_pattern = f"{OUTPUT_FOLDER}/{output_prefix}_%03d.m4a"
+    command = [
+        "ffmpeg", "-i", input_file, "-f", "segment", "-segment_time", str(segment_time),
+        "-c", "copy", output_pattern
+    ]
+    subprocess.run(command, check=True)
+    
+    # 분할된 파일 리스트 생성
+    split_files = sorted([f for f in os.listdir(OUTPUT_FOLDER) if f.startswith(output_prefix)])
+    return [os.path.join(OUTPUT_FOLDER, f) for f in split_files]
+
+# Celery 작업: 20MB 단위로 분할 후 변환
 @celery.task(bind=True)
 def convert_audio_task(self, input_file):
-    output_file = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}.mp3")
+    file_size = os.path.getsize(input_file)
+    MAX_SIZE = 20 * 1024 * 1024  # 20MB
+    output_files = []
 
-    # FFmpeg을 사용하여 M4A → MP3 변환
-    command = f'ffmpeg -i "{input_file}" -c:a libmp3lame -b:a 128k "{output_file}"'
-    os.system(command)
+    # 20MB 이상이면 분할
+    if file_size > MAX_SIZE:
+        print(f"🔹 파일이 20MB를 초과하여 분할 처리: {file_size / (1024*1024):.2f}MB")
+        base_name = uuid.uuid4().hex
+        split_files = split_audio(input_file, base_name)
 
-    return {"output_file": output_file}
+        # 분할된 각 파일을 MP3로 변환
+        for idx, split_file in enumerate(split_files):
+            output_file = os.path.join(OUTPUT_FOLDER, f"{base_name}_{idx}.mp3")
+            command = ["ffmpeg", "-i", split_file, "-c:a", "libmp3lame", "-b:a", "128k", output_file]
+            subprocess.run(command, check=True)
+            output_files.append(output_file)
+
+    else:
+        # 20MB 이하이면 그대로 변환
+        output_file = os.path.join(OUTPUT_FOLDER, f"{uuid.uuid4().hex}.mp3")
+        command = ["ffmpeg", "-i", input_file, "-c:a", "libmp3lame", "-b:a", "128k", output_file]
+        subprocess.run(command, check=True)
+        output_files.append(output_file)
+
+    return {"output_files": output_files}
 
 # 파일 업로드 및 변환 API
 @app.route("/convert", methods=["POST"])
@@ -52,7 +87,7 @@ def task_status(task_id):
     if task.state == "PENDING":
         response = {"status": "pending"}
     elif task.state == "SUCCESS":
-        response = {"status": "completed", "output_file": task.result["output_file"]}
+        response = {"status": "completed", "output_files": task.result["output_files"]}
     else:
         response = {"status": "failed"}
 
@@ -61,8 +96,7 @@ def task_status(task_id):
 # 변환된 파일 다운로드 API
 @app.route("/download/<filename>", methods=["GET"])
 def download_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=True)
+    return send_from_directory(OUTPUT_FOLDER, filename, as_attachment=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
-
