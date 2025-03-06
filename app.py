@@ -1,9 +1,8 @@
 import os
 import uuid
-import math
+import subprocess
 from flask import Flask, request, jsonify, send_from_directory
 from celery import Celery
-import subprocess
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
@@ -11,20 +10,17 @@ OUTPUT_FOLDER = "outputs"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# Render에서 제공하는 REDIS_URL 사용 (없으면 기본값 localhost:6379)
+# Render에서 설정한 REDIS_URL 사용
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
 app.config["CELERY_BROKER_URL"] = REDIS_URL
 app.config["CELERY_RESULT_BACKEND"] = REDIS_URL
 
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
 celery.conf.update(app.config)
 
-print(f"🔹 현재 사용 중인 REDIS_URL: {REDIS_URL}")
-
-# 20MB 단위로 오디오를 분할하는 함수
-def split_audio(input_file, output_prefix, segment_time=600):
-    """FFmpeg을 사용하여 지정된 시간(초) 간격으로 오디오 파일을 분할"""
+# 📌 오디오 파일을 15분(900초) 단위로 분할하는 함수
+def split_audio_by_time(input_file, output_prefix, segment_time=900):
+    """FFmpeg을 사용하여 오디오 파일을 15분 단위(900초)로 분할"""
     output_pattern = f"{OUTPUT_FOLDER}/{output_prefix}_%03d.m4a"
     command = [
         "ffmpeg", "-i", input_file, "-f", "segment", "-segment_time", str(segment_time),
@@ -32,34 +28,24 @@ def split_audio(input_file, output_prefix, segment_time=600):
     ]
     subprocess.run(command, check=True)
     
-    # 분할된 파일 리스트 생성
+    # 분할된 파일 리스트 반환
     split_files = sorted([f for f in os.listdir(OUTPUT_FOLDER) if f.startswith(output_prefix)])
     return [os.path.join(OUTPUT_FOLDER, f) for f in split_files]
 
-# Celery 작업: 20MB 단위로 분할 후 변환
+# Celery 작업: 15분 단위로 분할 후 MP3 변환
 @celery.task(bind=True)
 def convert_audio_task(self, input_file):
-    file_size = os.path.getsize(input_file)
-    MAX_SIZE = 20 * 1024 * 1024  # 20MB
     output_files = []
+    base_name = uuid.uuid4().hex
 
-    # 20MB 이상이면 분할
-    if file_size > MAX_SIZE:
-        print(f"🔹 파일이 20MB를 초과하여 분할 처리: {file_size / (1024*1024):.2f}MB")
-        base_name = uuid.uuid4().hex
-        split_files = split_audio(input_file, base_name)
+    # 15분 단위로 파일 분할
+    print(f"🔹 파일을 15분 단위로 분할 중...")
+    split_files = split_audio_by_time(input_file, base_name)
 
-        # 분할된 각 파일을 MP3로 변환
-        for idx, split_file in enumerate(split_files):
-            output_file = os.path.join(OUTPUT_FOLDER, f"{base_name}_{idx}.mp3")
-            command = ["ffmpeg", "-i", split_file, "-c:a", "libmp3lame", "-b:a", "128k", output_file]
-            subprocess.run(command, check=True)
-            output_files.append(output_file)
-
-    else:
-        # 20MB 이하이면 그대로 변환
-        output_file = os.path.join(OUTPUT_FOLDER, f"{uuid.uuid4().hex}.mp3")
-        command = ["ffmpeg", "-i", input_file, "-c:a", "libmp3lame", "-b:a", "128k", output_file]
+    # 분할된 각 파일을 MP3로 변환
+    for idx, split_file in enumerate(split_files):
+        output_file = os.path.join(OUTPUT_FOLDER, f"{base_name}_{idx}.mp3")
+        command = ["ffmpeg", "-i", split_file, "-c:a", "libmp3lame", "-b:a", "128k", output_file]
         subprocess.run(command, check=True)
         output_files.append(output_file)
 
