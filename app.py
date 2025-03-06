@@ -17,6 +17,8 @@ app.config["CELERY_RESULT_BACKEND"] = REDIS_URL
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
 celery.conf.update(app.config)
 
+print(f"🔹 현재 사용 중인 REDIS_URL: {REDIS_URL}")
+
 # Celery 작업: 오디오 변환
 @celery.task(bind=True)
 def convert_audio_task(self, input_file):
@@ -63,3 +65,4 @@ def download_file(filename):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
