@@ -1,6 +1,6 @@
 #!/bin/bash
-mkdir -p ~/ffmpeg && cd ~/ffmpeg
-wget https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-tar -xvf ffmpeg-release-amd64-static.tar.xz
-mv ffmpeg-*-static ffmpeg_bin
-export PATH=$PATH:~/ffmpeg/ffmpeg_bin
+# FFmpeg 바이너리 다운로드 경로 변경
+mkdir -p /opt/render/ffmpeg && cd /opt/render/ffmpeg
+wget -O ffmpeg.tar.xz "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.tar.xz"
+tar -xvf ffmpeg.tar.xz --strip-components=1
+export PATH=$PATH:/opt/render/ffmpeg
