@@ -4,30 +4,46 @@ import os
 
 app = Celery(
     "tasks",
-    broker="redis://localhost:6379/0",  # Redis를 사용하여 백그라운드 작업 관리
+    broker="redis://localhost:6379/0",  # Redis를 브로커로 사용
     backend="redis://localhost:6379/0"
 )
 
 UPLOAD_FOLDER = "uploads"
+PROCESSED_FOLDER = "processed"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
+# 🔹 15분 단위로 오디오 파일을 나누는 함수
+def split_audio(input_file, output_folder=UPLOAD_FOLDER, segment_time=900):
+    os.makedirs(output_folder, exist_ok=True)
+    output_pattern = os.path.join(output_folder, "segment_%03d.m4a")
+    
+    command = [
+        "ffmpeg", "-i", input_file, 
+        "-f", "segment", "-segment_time", str(segment_time),
+        "-c", "copy", output_pattern
+    ]
+    
+    subprocess.run(command, check=True)
+    
+    return [os.path.join(output_folder, file) for file in sorted(os.listdir(output_folder)) if file.startswith("segment_")]
+
+# 🔹 분할된 오디오 파일을 변환하는 Celery 태스크
 @app.task
-def convert_audio_task(input_file):
-    output_pattern = os.path.join(UPLOAD_FOLDER, "output_%03d.mp3")
+def convert_audio(input_file):
+    output_file = input_file.replace(".m4a", ".mp3").replace(UPLOAD_FOLDER, PROCESSED_FOLDER)
 
-    # 원본 파일의 비트레이트 확인
-    bitrate_output = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0",
-                                     "-show_entries", "stream=bit_rate", "-of", "csv=p=0", input_file],
-                                    capture_output=True, text=True)
+    command = [
+        "ffmpeg", "-i", input_file,
+        "-b:a", "128k", "-preset", "ultrafast", "-threads", "4", "-vn", output_file
+    ]
+    
+    subprocess.run(command, check=True)
+    
+    return output_file
 
-    bitrate_str = bitrate_output.stdout.strip()
-    bitrate_kbps = int(bitrate_str) // 1000 if bitrate_str.isdigit() else 128
-
-    segment_time = (20 * 8 * 1024) // bitrate_kbps  # 20MB 이하로 유지
-
-    # FFmpeg 변환 실행
-    subprocess.run(["ffmpeg", "-i", input_file, "-f", "segment",
-                    "-segment_time", str(segment_time), "-c:a", "libmp3lame",
-                    "-b:a", "128k", output_pattern])
-
-    return [f"{UPLOAD_FOLDER}/{file}" for file in os.listdir(UPLOAD_FOLDER) if file.startswith("output_")]
+# 🔹 메인 변환 함수 (파일 분할 후 병렬 변환)
+def process_audio(input_file):
+    segments = split_audio(input_file)
+    tasks = [convert_audio.delay(segment) for segment in segments]  # 비동기 실행
+    return tasks
