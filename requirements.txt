@@ -3,3 +3,4 @@ celery
 redis
 requests
 python-dotenv
+gunicorn
