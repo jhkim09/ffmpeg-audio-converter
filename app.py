@@ -22,8 +22,9 @@ celery.conf.update(app.config)
 
 # 🔹 Slack Webhook URL (환경 변수로 설정)
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+SERVER_URL = os.getenv("SERVER_URL", "http://localhost:5000")  # Render 배포 주소 설정
 
-#  아웃풋 result
+# 🔹 변환 상태 확인 API
 @app.route("/status/<task_id>", methods=["GET"])
 def task_status(task_id):
     task = convert_audio_task.AsyncResult(task_id)
@@ -31,9 +32,12 @@ def task_status(task_id):
     if task.state == "PENDING":
         response = {"status": "pending"}
     elif task.state == "SUCCESS":
-        response = {"status": "completed", "output_files": task.result["output_files"]}
+        result = task.result if task.result else {}
+        response = {"status": "completed", "output_files": result.get("output_files", [])}
+    elif task.state == "FAILURE":
+        response = {"status": "failed", "error": str(task.result)}
     else:
-        response = {"status": "failed"}
+        response = {"status": "unknown"}
 
     return jsonify(response)
 
@@ -65,7 +69,7 @@ def convert_audio_task(self, input_file):
     split_files = split_audio_by_time(input_file, base_name)
 
     if not split_files:
-        return {"status": "failed", "error": "File splitting failed"}
+        return {"status": "failed", "output_files": []}
 
     for idx, split_file in enumerate(split_files):
         output_file = os.path.join(OUTPUT_FOLDER, f"{base_name}_{idx}.mp3")
@@ -73,24 +77,20 @@ def convert_audio_task(self, input_file):
             "ffmpeg", "-i", split_file,
             "-c:a", "libmp3lame", "-b:a", "128k",
             "-preset", "ultrafast", "-threads", "4",
-            "-progress", "pipe:1", output_file
+            output_file
         ]
 
         try:
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            for line in process.stdout:
-                if "out_time_ms" in line:
-                    timestamp = int(line.strip().split('=')[-1]) // 1000000
-                    print(f"🔹 변환 진행 중: {timestamp}초 변환 완료")
-            process.wait()
+            subprocess.run(command, check=True)
             output_files.append(output_file)
         except subprocess.CalledProcessError as e:
             print(f"❌ FFmpeg 변환 오류: {e}")
 
-    # 🔹 변환 완료 후 Slack 알림 발송
-    if SLACK_WEBHOOK_URL:
+    # 🔹 변환 완료 후 Slack 알림 발송 (파일 다운로드 링크 포함)
+    if SLACK_WEBHOOK_URL and output_files:
+        file_links = "\n".join([f"{SERVER_URL}/download/{os.path.basename(f)}" for f in output_files])
         slack_message = {
-            "text": f"✅ 오디오 변환 완료!\n\n📁 변환된 파일 수: {len(output_files)}개\n🔗 다운로드 링크 준비됨."
+            "text": f"✅ 오디오 변환 완료!\n\n📁 변환된 파일 수: {len(output_files)}개\n🔗 다운로드 링크:\n{file_links}"
         }
         requests.post(SLACK_WEBHOOK_URL, json=slack_message)
         print("✅ Slack 알림 전송 완료!")
