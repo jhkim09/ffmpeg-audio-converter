@@ -60,12 +60,15 @@ def convert_audio_task(self, input_file):
     base_name = uuid.uuid4().hex
 
     print(f"🔹 파일을 15분 단위로 분할 중...")
+    send_slack_notification(f"🔹 변환 작업 시작: 파일을 15분 단위로 나누는 중...")
+
     split_files = split_audio_by_time(input_file, base_name)
 
     if not split_files:
+        send_slack_notification("❌ 변환 실패: 파일을 분할할 수 없습니다.")
         return {"status": "failed", "error": "File splitting failed"}
 
-    send_slack_notification(f"🔹 변환 작업 시작: {len(split_files)}개 파일 변환 예정")
+    send_slack_notification(f"📌 변환 시작: 총 {len(split_files)}개의 파일 변환 예정")
 
     for idx, split_file in enumerate(split_files):
         output_file = os.path.join(OUTPUT_FOLDER, f"{base_name}_{idx}.mp3")
@@ -81,11 +84,14 @@ def convert_audio_task(self, input_file):
             for line in process.stdout:
                 if "out_time_ms" in line:
                     timestamp = int(line.strip().split('=')[-1]) // 1000000
-                    print(f"🔹 변환 진행 중: {timestamp}초 변환 완료")
+                    progress_message = f"🔹 변환 진행 중: {idx+1}/{len(split_files)}번째 파일 {timestamp}초 변환 완료"
+                    print(progress_message)
+                    send_slack_notification(progress_message)
             process.wait()
             output_files.append(output_file)
         except subprocess.CalledProcessError as e:
             print(f"❌ FFmpeg 변환 오류: {e}")
+            send_slack_notification(f"❌ 변환 오류 발생: {e}")
 
     # 🔹 변환 완료 후 Slack 알림 발송
     if output_files:
