@@ -33,7 +33,10 @@ def task_status(task_id):
         response = {"status": "pending"}
     elif task.state == "SUCCESS":
         result = task.result if task.result else {}
-        response = {"status": "completed", "output_files": result.get("output_files", [])}
+        output_files = result.get("output_files", [])
+        if not output_files:
+            print("⚠️ 변환이 완료되었지만 output_files이 비어 있음!")
+        response = {"status": "completed", "output_files": output_files}
     elif task.state == "FAILURE":
         response = {"status": "failed", "error": str(task.result)}
     else:
@@ -51,7 +54,8 @@ def split_audio_by_time(input_file, output_prefix, segment_time=900):
     ]
     
     try:
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        print(f"✅ FFmpeg 분할 완료: {output_pattern}")
     except subprocess.CalledProcessError as e:
         print(f"❌ FFmpeg 분할 오류: {e}")
         return []
@@ -69,6 +73,7 @@ def convert_audio_task(self, input_file):
     split_files = split_audio_by_time(input_file, base_name)
 
     if not split_files:
+        print("❌ 파일 분할 실패! FFmpeg 오류 가능성 있음.")
         return {"status": "failed", "output_files": []}
 
     for idx, split_file in enumerate(split_files):
@@ -81,17 +86,33 @@ def convert_audio_task(self, input_file):
         ]
 
         try:
-            subprocess.run(command, check=True)
-            output_files.append(output_file)
+            result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            print(f"✅ FFmpeg 변환 완료: {output_file}")
+            print(result.stdout)  # FFmpeg 실행 로그 출력
+            print(result.stderr)  # FFmpeg 오류 로그 출력
+
+            if os.path.exists(output_file):
+                output_files.append(output_file)
+            else:
+                print(f"❌ 변환된 파일이 없음: {output_file}")
+
         except subprocess.CalledProcessError as e:
             print(f"❌ FFmpeg 변환 오류: {e}")
+            print(e.stderr)
+
+    if not output_files:
+        print("❌ 변환된 파일이 없음!")
+        return {"status": "failed", "output_files": []}
 
     # 🔹 변환 완료 후 Slack 알림 발송 (파일 다운로드 링크 포함)
-    if SLACK_WEBHOOK_URL and output_files:
-        file_links = "\n".join([f"{SERVER_URL}/download/{os.path.basename(f)}" for f in output_files])
-        slack_message = {
-            "text": f"✅ 오디오 변환 완료!\n\n📁 변환된 파일 수: {len(output_files)}개\n🔗 다운로드 링크:\n{file_links}"
-        }
+    if SLACK_WEBHOOK_URL:
+        if output_files:
+            file_links = "\n".join([f"{SERVER_URL}/download/{os.path.basename(f)}" for f in output_files])
+            slack_message = {
+                "text": f"✅ 오디오 변환 완료!\n\n📁 변환된 파일 수: {len(output_files)}개\n🔗 다운로드 링크:\n{file_links}"
+            }
+        else:
+            slack_message = {"text": "⚠️ 변환이 완료되었지만 파일이 없습니다. 오류 로그를 확인하세요."}
         requests.post(SLACK_WEBHOOK_URL, json=slack_message)
         print("✅ Slack 알림 전송 완료!")
 
