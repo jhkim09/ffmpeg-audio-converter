@@ -1,49 +1,27 @@
-from celery import Celery
-import subprocess
 import os
+from celery import Celery
+from dotenv import load_dotenv
 
-app = Celery(
-    "tasks",
-    broker="redis://localhost:6379/0",  # Redis를 브로커로 사용
-    backend="redis://localhost:6379/0"
+# 🔹 환경 변수 로드 (.env 사용 가능)
+load_dotenv()
+
+# 🔹 Redis URL 설정 (app.py와 동일하게 유지)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+# 🔹 Celery 설정
+celery = Celery("celery_worker", broker=REDIS_URL, backend=REDIS_URL)
+
+# 🔹 Celery 작업 실행 로그 출력
+celery.conf.update(
+    task_track_started=True,  # 작업 시작 여부 추적
+    worker_send_task_events=True,  # 작업 이벤트 로깅 활성화
 )
 
-UPLOAD_FOLDER = "uploads"
-PROCESSED_FOLDER = "processed"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(PROCESSED_FOLDER, exist_ok=True)
+# 🔹 Celery 로그 출력 (디버깅용)
+@celery.task(bind=True)
+def debug_task(self):
+    print(f"🔹 [Celery Task] Request: {self.request!r}")
 
-# 🔹 15분 단위로 오디오 파일을 나누는 함수
-def split_audio(input_file, output_folder=UPLOAD_FOLDER, segment_time=900):
-    os.makedirs(output_folder, exist_ok=True)
-    output_pattern = os.path.join(output_folder, "segment_%03d.m4a")
-    
-    command = [
-        "ffmpeg", "-i", input_file, 
-        "-f", "segment", "-segment_time", str(segment_time),
-        "-c", "copy", output_pattern
-    ]
-    
-    subprocess.run(command, check=True)
-    
-    return [os.path.join(output_folder, file) for file in sorted(os.listdir(output_folder)) if file.startswith("segment_")]
-
-# 🔹 분할된 오디오 파일을 변환하는 Celery 태스크
-@app.task
-def convert_audio(input_file):
-    output_file = input_file.replace(".m4a", ".mp3").replace(UPLOAD_FOLDER, PROCESSED_FOLDER)
-
-    command = [
-        "ffmpeg", "-i", input_file,
-        "-b:a", "128k", "-preset", "ultrafast", "-threads", "4", "-vn", output_file
-    ]
-    
-    subprocess.run(command, check=True)
-    
-    return output_file
-
-# 🔹 메인 변환 함수 (파일 분할 후 병렬 변환)
-def process_audio(input_file):
-    segments = split_audio(input_file)
-    tasks = [convert_audio.delay(segment) for segment in segments]  # 비동기 실행
-    return tasks
+if __name__ == "__main__":
+    print("🚀 Celery Worker 실행 중...")
+    celery.worker_main()
