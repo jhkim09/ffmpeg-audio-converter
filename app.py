@@ -1,18 +1,22 @@
 import os
 import uuid
 import subprocess
+import requests
 from flask import Flask, request, jsonify, send_from_directory
 from celery import Celery
+from dotenv import load_dotenv
+
+# 🔹 환경 변수 로드 (.env 사용 가능)
+load_dotenv()
 
 app = Flask(__name__)
 
-# 🔹 업로드 및 출력 폴더 생성
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# 🔹 Redis URL 설정 (Render 환경 또는 기본 로컬 Redis)
+# 🔹 Redis 설정 (환경 변수에서 로드)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 app.config["CELERY_BROKER_URL"] = REDIS_URL
 app.config["CELERY_RESULT_BACKEND"] = REDIS_URL
@@ -20,9 +24,19 @@ app.config["CELERY_RESULT_BACKEND"] = REDIS_URL
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
 celery.conf.update(app.config)
 
-# 🔹 15분 단위로 오디오 파일 분할 함수
+# 🔹 Slack Webhook URL (환경 변수 사용)
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+
+# 🔹 Slack 알림 함수
+def send_slack_notification(message):
+    """Slack Webhook을 통해 알림을 전송하는 함수"""
+    if SLACK_WEBHOOK_URL:
+        payload = {"text": message}
+        response = requests.post(SLACK_WEBHOOK_URL, json=payload)
+        print(f"🔔 Slack 알림 전송 상태: {response.status_code}")  # 로그 출력
+
+# 🔹 15분(900초) 단위로 오디오 파일 분할
 def split_audio_by_time(input_file, output_prefix, segment_time=900):
-    """FFmpeg을 사용하여 오디오 파일을 15분 단위(900초)로 분할"""
     output_pattern = os.path.join(OUTPUT_FOLDER, f"{output_prefix}_%03d.m4a")
 
     command = [
@@ -36,37 +50,49 @@ def split_audio_by_time(input_file, output_prefix, segment_time=900):
         print(f"❌ FFmpeg 분할 오류: {e}")
         return []
 
-    # 🔹 분할된 파일 리스트 반환
     split_files = sorted([f for f in os.listdir(OUTPUT_FOLDER) if f.startswith(output_prefix) and f.endswith(".m4a")])
     return [os.path.join(OUTPUT_FOLDER, f) for f in split_files]
 
-# 🔹 Celery 작업: 15분 단위로 분할 후 MP3 변환
+# 🔹 Celery 작업: 변환 후 Slack 알림 전송
 @celery.task(bind=True)
 def convert_audio_task(self, input_file):
     output_files = []
     base_name = uuid.uuid4().hex
 
-    # 🔹 15분 단위로 파일 분할
     print(f"🔹 파일을 15분 단위로 분할 중...")
     split_files = split_audio_by_time(input_file, base_name)
 
     if not split_files:
         return {"status": "failed", "error": "File splitting failed"}
 
-    # 🔹 분할된 각 파일을 MP3로 변환
+    send_slack_notification(f"🔹 변환 작업 시작: {len(split_files)}개 파일 변환 예정")
+
     for idx, split_file in enumerate(split_files):
         output_file = os.path.join(OUTPUT_FOLDER, f"{base_name}_{idx}.mp3")
         command = [
             "ffmpeg", "-i", split_file,
             "-c:a", "libmp3lame", "-b:a", "128k",
-            "-preset", "ultrafast", "-threads", "4", output_file
+            "-preset", "ultrafast", "-threads", "4",
+            "-progress", "pipe:1", output_file
         ]
 
         try:
-            subprocess.run(command, check=True)
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for line in process.stdout:
+                if "out_time_ms" in line:
+                    timestamp = int(line.strip().split('=')[-1]) // 1000000
+                    print(f"🔹 변환 진행 중: {timestamp}초 변환 완료")
+            process.wait()
             output_files.append(output_file)
         except subprocess.CalledProcessError as e:
             print(f"❌ FFmpeg 변환 오류: {e}")
+
+    # 🔹 변환 완료 후 Slack 알림 발송
+    if output_files:
+        file_list = "\n".join([os.path.basename(f) for f in output_files])
+        slack_message = f"✅ 오디오 변환 완료!\n📁 변환된 파일 수: {len(output_files)}개\n🔗 파일 목록:\n{file_list}"
+        send_slack_notification(slack_message)
+        print("✅ Slack 알림 전송 완료!")
 
     return {"status": "completed", "output_files": output_files}
 
@@ -92,7 +118,7 @@ def task_status(task_id):
     if task.state == "PENDING":
         response = {"status": "pending"}
     elif task.state == "SUCCESS":
-        response = task.result
+        response = {"status": "completed", "output_files": task.result["output_files"]}
     else:
         response = {"status": "failed"}
 
