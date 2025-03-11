@@ -2,9 +2,6 @@ import os
 import uuid
 import subprocess
 import requests
-import time
-import gc  # 가비지 컬렉션을 위한 모듈
-from threading import Timer  # 특정 시간 후 실행
 from flask import Flask, request, jsonify, send_from_directory
 from celery import Celery
 
@@ -18,21 +15,13 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 # 🔹 Redis 설정
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 app.config["CELERY_BROKER_URL"] = REDIS_URL
-app.config["CELERY_RESULT_BACKEND"] = REDIS_URL
+app.config["result_backend"] = REDIS_URL  # 변경된 설정
 
-celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
-celery.conf.update(app.config)
+celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"], backend=app.config["result_backend"])
 
-# 🔹 Slack Webhook URL (환경 변수로 설정)
+# 🔹 Slack Webhook URL & 서버 URL 설정
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
-SERVER_URL = os.getenv("SERVER_URL", "http://localhost:5000")  # Render 배포 주소 설정
-
-# 🔹 Celery 작업 후 메모리 해제 함수 (10분 후 실행)
-def terminate_worker():
-    print("🔹 메모리 해제 및 Celery 워커 재시작")
-    os.system("pkill -9 celery")  # Celery 프로세스 강제 종료
-    os.system("celery -A app.celery worker --loglevel=info &")  # Celery 다시 실행
-    gc.collect()  # 가비지 컬렉션 실행
+SERVER_URL = os.getenv("SERVER_URL", "http://localhost:5000")
 
 # 🔹 변환 상태 확인 API
 @app.route("/status/<task_id>", methods=["GET"])
@@ -42,21 +31,14 @@ def task_status(task_id):
     if task.state == "PENDING":
         response = {"status": "pending"}
     elif task.state == "SUCCESS":
-        try:
-            result = task.get(timeout=1)  # 명확하게 결과 가져오기
-            response = {
-                "status": "completed",
-                "output_files": result.get("output_files", []) if result else []
-            }
-        except Exception as e:
-            response = {"status": "failed", "error": str(e)}
+        result = task.result if task.result else {}
+        response = {"status": "completed", "output_files": result.get("output_files", [])}
     elif task.state == "FAILURE":
         response = {"status": "failed", "error": str(task.result)}
     else:
         response = {"status": "unknown"}
 
     return jsonify(response)
-
 
 # 🔹 15분 단위로 오디오 파일 분할
 def split_audio_by_time(input_file, output_prefix, segment_time=900):
@@ -68,8 +50,7 @@ def split_audio_by_time(input_file, output_prefix, segment_time=900):
     ]
     
     try:
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        print(f"✅ FFmpeg 분할 완료: {output_pattern}")
+        subprocess.run(command, check=True)
     except subprocess.CalledProcessError as e:
         print(f"❌ FFmpeg 분할 오류: {e}")
         return []
@@ -77,7 +58,7 @@ def split_audio_by_time(input_file, output_prefix, segment_time=900):
     split_files = sorted([f for f in os.listdir(OUTPUT_FOLDER) if f.startswith(output_prefix) and f.endswith(".m4a")])
     return [os.path.join(OUTPUT_FOLDER, f) for f in split_files]
 
-# 🔹 Celery 작업: 변환 후 Slack 알림 + 메모리 리셋 예약
+# 🔹 Celery 작업: 변환 후 Slack 알림 (순차 변환 & 파일 삭제)
 @celery.task(bind=True)
 def convert_audio_task(self, input_file):
     output_files = []
@@ -87,7 +68,6 @@ def convert_audio_task(self, input_file):
     split_files = split_audio_by_time(input_file, base_name)
 
     if not split_files:
-        print("❌ 파일 분할 실패! FFmpeg 오류 가능성 있음.")
         return {"status": "failed", "output_files": []}
 
     for idx, split_file in enumerate(split_files):
@@ -100,38 +80,20 @@ def convert_audio_task(self, input_file):
         ]
 
         try:
-            result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            print(f"✅ FFmpeg 변환 완료: {output_file}")
-            print(result.stdout)  # FFmpeg 실행 로그 출력
-            print(result.stderr)  # FFmpeg 오류 로그 출력
-
-            if os.path.exists(output_file):
-                output_files.append(output_file)
-            else:
-                print(f"❌ 변환된 파일이 없음: {output_file}")
-
+            subprocess.run(command, check=True)
+            output_files.append(output_file)
+            os.remove(split_file)  # 🔹 변환 완료된 파일 즉시 삭제 (용량 절약)
         except subprocess.CalledProcessError as e:
             print(f"❌ FFmpeg 변환 오류: {e}")
-            print(e.stderr)
-
-    if not output_files:
-        print("❌ 변환된 파일이 없음!")
-        return {"status": "failed", "output_files": []}
 
     # 🔹 변환 완료 후 Slack 알림 발송 (파일 다운로드 링크 포함)
-    if SLACK_WEBHOOK_URL:
-        if output_files:
-            file_links = "\n".join([f"{SERVER_URL}/download/{os.path.basename(f)}" for f in output_files])
-            slack_message = {
-                "text": f"✅ 오디오 변환 완료!\n\n📁 변환된 파일 수: {len(output_files)}개\n🔗 다운로드 링크:\n{file_links}"
-            }
-        else:
-            slack_message = {"text": "⚠️ 변환이 완료되었지만 파일이 없습니다. 오류 로그를 확인하세요."}
+    if SLACK_WEBHOOK_URL and output_files:
+        file_links = "\n".join([f"{SERVER_URL}/download/{os.path.basename(f)}" for f in output_files])
+        slack_message = {
+            "text": f"✅ 오디오 변환 완료!\n\n📁 변환된 파일 수: {len(output_files)}개\n🔗 다운로드 링크:\n{file_links}"
+        }
         requests.post(SLACK_WEBHOOK_URL, json=slack_message)
         print("✅ Slack 알림 전송 완료!")
-
-    # 🔹 10분 후 Celery 메모리 해제
-    Timer(600, terminate_worker).start()
 
     return {"status": "completed", "output_files": output_files}
 
