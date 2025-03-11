@@ -2,6 +2,9 @@ import os
 import uuid
 import subprocess
 import requests
+import time
+import gc  # 가비지 컬렉션을 위한 모듈
+from threading import Timer  # 특정 시간 후 실행
 from flask import Flask, request, jsonify, send_from_directory
 from celery import Celery
 
@@ -23,6 +26,13 @@ celery.conf.update(app.config)
 # 🔹 Slack Webhook URL (환경 변수로 설정)
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:5000")  # Render 배포 주소 설정
+
+# 🔹 Celery 작업 후 메모리 해제 함수 (10분 후 실행)
+def terminate_worker():
+    print("🔹 메모리 해제 및 Celery 워커 재시작")
+    os.system("pkill -9 celery")  # Celery 프로세스 강제 종료
+    os.system("celery -A app.celery worker --loglevel=info &")  # Celery 다시 실행
+    gc.collect()  # 가비지 컬렉션 실행
 
 # 🔹 변환 상태 확인 API
 @app.route("/status/<task_id>", methods=["GET"])
@@ -63,7 +73,7 @@ def split_audio_by_time(input_file, output_prefix, segment_time=900):
     split_files = sorted([f for f in os.listdir(OUTPUT_FOLDER) if f.startswith(output_prefix) and f.endswith(".m4a")])
     return [os.path.join(OUTPUT_FOLDER, f) for f in split_files]
 
-# 🔹 Celery 작업: 변환 후 Slack 알림
+# 🔹 Celery 작업: 변환 후 Slack 알림 + 메모리 리셋 예약
 @celery.task(bind=True)
 def convert_audio_task(self, input_file):
     output_files = []
@@ -115,6 +125,9 @@ def convert_audio_task(self, input_file):
             slack_message = {"text": "⚠️ 변환이 완료되었지만 파일이 없습니다. 오류 로그를 확인하세요."}
         requests.post(SLACK_WEBHOOK_URL, json=slack_message)
         print("✅ Slack 알림 전송 완료!")
+
+    # 🔹 10분 후 Celery 메모리 해제
+    Timer(600, terminate_worker).start()
 
     return {"status": "completed", "output_files": output_files}
 
