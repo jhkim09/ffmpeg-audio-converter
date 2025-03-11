@@ -42,17 +42,21 @@ def task_status(task_id):
     if task.state == "PENDING":
         response = {"status": "pending"}
     elif task.state == "SUCCESS":
-        result = task.result if task.result else {}
-        output_files = result.get("output_files", [])
-        if not output_files:
-            print("⚠️ 변환이 완료되었지만 output_files이 비어 있음!")
-        response = {"status": "completed", "output_files": output_files}
+        try:
+            result = task.get(timeout=1)  # 명확하게 결과 가져오기
+            response = {
+                "status": "completed",
+                "output_files": result.get("output_files", []) if result else []
+            }
+        except Exception as e:
+            response = {"status": "failed", "error": str(e)}
     elif task.state == "FAILURE":
         response = {"status": "failed", "error": str(task.result)}
     else:
         response = {"status": "unknown"}
 
     return jsonify(response)
+
 
 # 🔹 15분 단위로 오디오 파일 분할
 def split_audio_by_time(input_file, output_prefix, segment_time=900):
