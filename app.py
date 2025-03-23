@@ -42,21 +42,31 @@ def task_status(task_id):
 
 # 🔹 15분 단위로 오디오 파일 분할
 def split_audio_by_time(input_file, output_prefix, segment_time=900):
-    output_pattern = os.path.join(OUTPUT_FOLDER, f"{output_prefix}_%03d.m4a")
-
+    output_pattern = os.path.join(OUTPUT_FOLDER, f"{output_prefix}_%03d.mp3")
     command = [
-        "ffmpeg", "-i", input_file, "-f", "segment",
-        "-segment_time", str(segment_time), "-c", "copy", output_pattern
+        "ffmpeg", "-i", input_file,
+        "-f", "segment",
+        "-segment_time", str(segment_time),
+        "-c:a", "libmp3lame",
+        "-b:a", "128k",
+        "-ar", "44100",
+        "-ac", "2",
+        "-fflags", "+genpts",
+        "-avoid_negative_ts", "make_zero",
+        output_pattern
     ]
-    
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError as e:
         print(f"❌ FFmpeg 분할 오류: {e}")
         return []
 
-    split_files = sorted([f for f in os.listdir(OUTPUT_FOLDER) if f.startswith(output_prefix) and f.endswith(".m4a")])
-    return [os.path.join(OUTPUT_FOLDER, f) for f in split_files]
+    return sorted([
+        os.path.join(OUTPUT_FOLDER, f)
+        for f in os.listdir(OUTPUT_FOLDER)
+        if f.startswith(output_prefix)
+    ])
+
 
 # 🔹 Celery 작업: 변환 후 Slack 알림 (순차 변환 & 파일 삭제)
 @celery.task(bind=True)
