@@ -13,4 +13,5 @@ export PATH=$FFMPEG_DIR:$PATH
 ffmpeg -version
 
 # Flask + Celery 실행
-gunicorn -w 4 -b 0.0.0.0:5000 app:app & celery -A celery_worker worker --loglevel=info --pool=solo --concurrency=2
+gunicorn -w 4 -b 0.0.0.0:5000 app:app & \
+celery -A celery_worker worker --loglevel=info --pool=solo --concurrency=2
