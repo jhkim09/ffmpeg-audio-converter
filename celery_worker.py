@@ -55,8 +55,7 @@ def convert_audio_task(self, input_file):
     if SLACK_WEBHOOK_URL and output_files:
         links = "\n".join(f"{SERVER_URL}/download/{os.path.basename(p)}" for p in output_files)
         try:
-            requests.post(SLACK_WEBHOOK_URL, json={"text": f"Audio conversion complete!\n\nFiles converted:
-{len(output_files)}\nDownload links:\n{links}"})
+            requests.post(SLACK_WEBHOOK_URL, json={"text": f"Audio conversion complete!\n\nFiles converted: {len(output_files)}\nDownload links:\n{links}"})
             print("Slack notification sent")
         except Exception as e:
             print(f"Slack notification failed: {e}")
