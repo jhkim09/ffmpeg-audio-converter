@@ -1,6 +1,6 @@
-flask
-celery
-redis
-requests
-python-dotenv
-gunicorn
+flask==2.3.3
+celery==5.3.4
+redis==5.0.4
+requests==2.31.0
+python-dotenv==1.0.1
+gunicorn==21.2.0
