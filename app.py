@@ -8,6 +8,11 @@ from kombu import ssl  # SSL 설정을 위한 import
 
 app = Flask(__name__)
 
+# 🔹 Redis 설정
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+app.config["CELERY_BROKER_URL"] = REDIS_URL
+app.config["result_backend"] = REDIS_URL
+
 # 🔹 Celery 초기화
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"], backend=app.config["result_backend"])
 
@@ -16,13 +21,6 @@ UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-
-# 🔹 Redis 설정
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-app.config["CELERY_BROKER_URL"] = REDIS_URL
-app.config["result_backend"] = REDIS_URL
-
-
 
 # 🔹 SSL 옵션 설정 (TLS redis 사용 시 필수)
 if REDIS_URL.startswith("rediss://"):
@@ -137,4 +135,5 @@ def download_file(filename):
 # 🔹 앱 실행
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
