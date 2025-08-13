@@ -4,45 +4,70 @@ import subprocess
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 from celery import Celery
+from dotenv import load_dotenv
 
-# Flask 앱 초기화
+# 환경변수 로드
+load_dotenv()
+
+# Flask 앱 생성
 app = Flask(__name__)
-
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# 🔹 Redis URL 설정 (내부용 Redis일 경우 rediss → redis)
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-app.config["CELERY_BROKER_URL"] = REDIS_URL
-app.config["result_backend"] = REDIS_URL
+# Celery 설정
+def make_celery(app):
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    celery = Celery(
+        app.import_name,
+        broker=redis_url,
+        backend=redis_url,
+    )
+    celery.conf.update(app.config)
+    TaskBase = celery.Task
 
-# 🔹 Celery 초기화
-celery = Celery(app.name, broker=REDIS_URL, backend=REDIS_URL)
+    class ContextTask(TaskBase):
+        def __call__(self, *args, **kwargs):
+            with app.app_context():
+                return TaskBase.__call__(self, *args, **kwargs)
+    celery.Task = ContextTask
+    return celery
 
-# 🔹 Slack & 서버 주소
+celery = make_celery(app)
+
+# 슬랙 & 서버 주소
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:5000")
 
-# 🔹 작업 상태 확인 API
+@app.route("/convert", methods=["POST"])
+def convert_audio():
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files["file"]
+    input_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(input_path)
+
+    task = convert_audio_task.apply_async(args=[input_path])
+    return jsonify({"status": "accepted", "task_id": task.id}), 202
+
 @app.route("/status/<task_id>", methods=["GET"])
 def task_status(task_id):
     task = convert_audio_task.AsyncResult(task_id)
-
     if task.state == "PENDING":
-        response = {"status": "pending"}
+        return jsonify({"status": "pending"})
     elif task.state == "SUCCESS":
-        result = task.result if task.result else {}
-        response = {"status": "completed", "output_files": result.get("output_files", [])}
+        return jsonify({"status": "completed", "output_files": task.result.get("output_files", [])})
     elif task.state == "FAILURE":
-        response = {"status": "failed", "error": str(task.result)}
+        return jsonify({"status": "failed", "error": str(task.result)})
     else:
-        response = {"status": "unknown"}
+        return jsonify({"status": "unknown"})
 
-    return jsonify(response)
+@app.route("/download/<filename>", methods=["GET"])
+def download_file(filename):
+    return send_from_directory(OUTPUT_FOLDER, filename, as_attachment=True)
 
-# 🔹 오디오 분할 함수
 def split_audio_by_time(input_file, output_prefix, segment_time=900):
     output_pattern = os.path.join(OUTPUT_FOLDER, f"{output_prefix}_%03d.mp3")
     command = [
@@ -69,13 +94,12 @@ def split_audio_by_time(input_file, output_prefix, segment_time=900):
         if f.startswith(output_prefix)
     ])
 
-# 🔹 Celery 작업 정의
 @celery.task(bind=True)
 def convert_audio_task(self, input_file):
     output_files = []
     base_name = uuid.uuid4().hex
 
-    print("🔹 15분 단위로 분할 시작")
+    print("🔹 15분 단위로 오디오 분할")
     split_files = split_audio_by_time(input_file, base_name)
 
     if not split_files:
@@ -94,35 +118,14 @@ def convert_audio_task(self, input_file):
             output_files.append(output_file)
             os.remove(split_file)
         except subprocess.CalledProcessError as e:
-            print(f"❌ FFmpeg 변환 오류: {e}")
+            print(f"❌ 변환 오류: {e}")
 
     if SLACK_WEBHOOK_URL and output_files:
         file_links = "\n".join([f"{SERVER_URL}/download/{os.path.basename(f)}" for f in output_files])
-        requests.post(SLACK_WEBHOOK_URL, json={"text": f"✅ 변환 완료\n\n🔗 링크:\n{file_links}"})
+        slack_message = {
+            "text": f":white_check_mark: 오디오 변환 완료!\n\n:file_folder: 변환된 파일 수: {len(output_files)}개\n:link: 다운로드 링크:\n{file_links}"
+        }
+        requests.post(SLACK_WEBHOOK_URL, json=slack_message)
+        print("✅ Slack 전송 완료")
 
     return {"status": "completed", "output_files": output_files}
-
-# 🔹 업로드 API
-@app.route("/convert", methods=["POST"])
-def convert_audio():
-    if "file" not in request.files:
-        return jsonify({"error": "No file provided"}), 400
-
-    file = request.files["file"]
-    input_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(input_path)
-
-    task = convert_audio_task.apply_async(args=[input_path])
-    return jsonify({"status": "accepted", "task_id": task.id}), 202
-
-# 🔹 다운로드 API
-@app.route("/download/<filename>", methods=["GET"])
-def download_file(filename):
-    return send_from_directory(OUTPUT_FOLDER, filename, as_attachment=True)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
-
-
-
-
